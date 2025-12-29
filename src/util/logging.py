@@ -1,5 +1,5 @@
 from logging import basicConfig
 
 
-def configure_logging():
-    basicConfig(level="INFO", force=True)
+def configure_logging(loglevel="INFO"):
+    basicConfig(level=loglevel, force=True)
