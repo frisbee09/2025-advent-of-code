@@ -2,9 +2,9 @@ import copy
 from dataclasses import dataclass
 from fractions import Fraction
 from functools import reduce
-from itertools import combinations
+from itertools import combinations, product
 from logging import getLogger
-from math import isclose
+from math import ceil, floor, isclose
 from operator import add
 import operator
 from pathlib import Path
@@ -32,13 +32,21 @@ def get_rref(m: list[list[int]]):
             ),
             (None, None),
         )
+        # This column is not a pivot column. Go to the next one
         if pivot is None:
             pivot_col += 1
             continue
 
+        # If the row we find is not in the right position, swap it
         if pivot_idx != pivot_row:
             # Swap!
             matrix[pivot_idx], matrix[pivot_row] = matrix[pivot_row], matrix[pivot_idx]
+
+        # Normalise the pivot row
+        pivot_scalar = matrix[pivot_row][pivot_col]
+        if pivot_scalar != 0:
+            matrix[pivot_row] = [Fraction(x / pivot_scalar) for x in pivot]
+            pivot = matrix[pivot_row]
 
         for row_idx, row in enumerate(matrix):
             if row_idx == pivot_row:
@@ -86,9 +94,19 @@ def analyse_rref(aug_m: list[list[int]]):
             row_index = pivot_rows_by_column[col_idx]
             gen_solution[0][col_idx] = aug_m[row_index][-1]
             for i in range(1, len(gen_solution)):
-                gen_solution[i][col_idx] = aug_m[row_index][col_idx] * -1
+                free_col_idx = free_idxs[i - 1]
+                gen_solution[i][col_idx] = aug_m[row_index][free_col_idx] * -1
 
     return gen_solution
+
+
+def make_int_range(low, high):
+    lo = int(ceil(float(low)))
+    hi = int(floor(float(high)))
+    if lo <= hi:
+        return range(lo, hi + 1)
+    else:
+        return range(lo, hi - 1, -1)
 
 
 def find_min_solution(gen_solution: list[list[int | Fraction]]):
@@ -99,50 +117,40 @@ def find_min_solution(gen_solution: list[list[int | Fraction]]):
         # There is only one solution
         return sum(particular)
 
-    best_cost = float("inf")
+    # Use something akin to partial differentiation to understand the
+    # coefficient ranges if we consider them to be linearly independent
+    coeff_ranges = []
+    for free_vector in frees:
+        mins = [0]
+        maxes = []
+        for idx, v in enumerate(free_vector):
+            if v < 0:
+                maxes.append(Fraction(particular[idx] / (-1 * v)))
+            elif v > 0:
+                mins.append(Fraction(particular[idx] / (-1 * v)))
 
-    # We are doing nCp where n is the number of variables (length of the
-    # particular vector) and p is the number of free variables
+        coeff_ranges.append((max(mins), min(maxes)))
 
-    for indicies_to_zero in combinations(range(len(particular)), len(frees)):
-        # We now take those rows and set them to 0, creating a smaller system
-        # e.g. P[i] + SUM(cx*vx[i]) = 0
-        vx = [[vec[row_idx] for vec in frees] for row_idx in indicies_to_zero]
-        P = [particular[row_idx] * -1 for row_idx in indicies_to_zero]
-        aug_m = [[*vx[i], P[i]] for i in range(len(vx))]
-        rref = get_rref(aug_m)
-        cx = [r[-1] for r in rref]
+    # This should be a very small solution space now
+    # In fact, if the number of frees is 1, we can analytically find the
+    # min_solution. However, for simplicity I am going to implement a general
+    # case algo which is less efficient for len(coeff_ranges) == 1
 
-        solution_is_valid = False
-        impossible_row = any(
-            (all(x == 0 for x in row[:-1]) and row[-1] != 0) for row in rref
-        )
-        no_negs = all(c >= 0 for c in cx)
-        all_ints = all(round(c) == c for c in cx)
+    coeff_ranges_as_ints = [make_int_range(low, high) for low, high in coeff_ranges]
+    costs = []
+    for combo in product(*coeff_ranges_as_ints):
+        coeffs = [1, *combo]
+        scaled_vectors = [
+            [x * scal for x in vec] for vec, scal in zip(gen_solution, coeffs)
+        ]
+        final_vector = [sum(a) for a in zip(*scaled_vectors)]
+        if all(x >= 0 and round(x) == x for x in final_vector):
+            costs.append(sum(final_vector))
+        else:
+            logger.debug("Not a viable solution")
+            continue
 
-        if not impossible_row and no_negs and all_ints:
-            solution_is_valid = True
-
-        if solution_is_valid:
-            all_scalars = [1, *cx]
-            final_vectors = [
-                [x * scalar for x in vec]
-                for vec, scalar in zip(gen_solution, all_scalars)
-            ]
-            final_vector = [sum(x) for x in zip(*final_vectors)]
-
-            no_negs = all(v >= 0 for v in final_vector)
-            all_ints = all(round(v) == v for v in final_vector)
-
-            if no_negs and all_ints:
-                solution_is_valid = True
-            else:
-                solution_is_valid = False
-
-            if solution_is_valid:
-                best_cost = min(best_cost, sum(final_vector))
-
-    return best_cost
+    return min(costs)
 
 
 class Machine:
@@ -153,6 +161,7 @@ class Machine:
 
     # Solution state tracking
     num_presses: int
+    num_frees: int
 
     def parse_puzzle(self, puzzle_input: str):
         parsed = re.match(INPUT_REGEX, puzzle_input)
@@ -175,29 +184,34 @@ class Machine:
     def __init__(self, puzzle_input: str):
         self.parse_puzzle(puzzle_input)
         self.solution = None
+        self.num_presses = None
 
     def solve(self):
         aug_matrix = [list(x) for x in zip(*self.buttons, self.joltages)]
         rref = get_rref(aug_matrix)
         gen_solution = analyse_rref(rref)
 
-        self.num_presses = find_min_solution(gen_solution)
+        self.num_frees = len(gen_solution) - 1
+        # self.num_presses = find_min_solution(gen_solution)
+        self.num_presses = 0
 
+        # logger.info(f"The minimum solution is {self.num_presses} moves.")
         return self.num_presses
 
 
 def main():
-    # line_generator = read_input(Path(__file__).parent / "input.txt")
-    line_generator = read_input(Path(__file__).parent / "test_input.txt")
+    line_generator = read_input(Path(__file__).parent / "input.txt")
+    # line_generator = read_input(Path(__file__).parent / "test_input.txt")
     machines: list[Machine] = []
 
     for line in line_generator:
         m = Machine(line)
         machines.append(m)
 
-    for idx, machine in enumerate(machines):
+    for machine in machines:
         machine.solve()
 
+    logger.debug(f"Most frees needed to handle = {max(m.num_frees for m in machines)}.")
     answer = reduce(
         operator.add,
         [m.num_presses for m in machines if m.num_presses is not None],
